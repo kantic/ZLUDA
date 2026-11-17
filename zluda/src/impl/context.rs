@@ -5,8 +5,64 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::{cell::RefCell, ffi::c_void, ptr, sync::Mutex};
 use zluda_common::{FromCuda, ZludaObject};
 
+// Maximum depth of the per-thread context stack (cuCtxPushCurrent nesting depth)
+const MAX_CONTEXT_STACK_DEPTH: usize = 64;
+
+// Per-thread context stack.
+// This type is deliberately `Copy` with a fixed capacity: a thread-local without drop glue never
+// registers a TLS destructor, so it stays accessible until the thread is gone. This matters,
+// because glibc's `exit()` runs TLS destructors of the main thread *before* atexit handlers and
+// C++ static destructors, and those (e.g. MXNet's engine) release their CUDA resources.
+#[derive(Clone, Copy)]
+pub(crate) struct ContextStack {
+    len: usize,
+    entries: [(CUcontext, hipDevice_t); MAX_CONTEXT_STACK_DEPTH],
+}
+
+impl ContextStack {
+    const fn new() -> Self {
+        Self {
+            len: 0,
+            entries: [(CUcontext(ptr::null_mut()), 0); MAX_CONTEXT_STACK_DEPTH],
+        }
+    }
+
+    fn last(&self) -> Option<&(CUcontext, hipDevice_t)> {
+        self.entries[..self.len].last()
+    }
+
+    fn pop(&mut self) -> Option<(CUcontext, hipDevice_t)> {
+        if self.len == 0 {
+            return None;
+        }
+        self.len -= 1;
+        Some(self.entries[self.len])
+    }
+
+    fn push(&mut self, entry: (CUcontext, hipDevice_t)) -> Result<(), CUerror> {
+        if self.len == MAX_CONTEXT_STACK_DEPTH {
+            return Err(CUerror::OUT_OF_MEMORY);
+        }
+        self.entries[self.len] = entry;
+        self.len += 1;
+        Ok(())
+    }
+
+    // Replaces the top of the stack, or pushes onto an empty stack
+    fn replace_last(&mut self, entry: (CUcontext, hipDevice_t)) {
+        if self.len == 0 {
+            self.entries[0] = entry;
+            self.len = 1;
+        } else {
+            self.entries[self.len - 1] = entry;
+        }
+    }
+}
+
+const _: () = assert!(!std::mem::needs_drop::<RefCell<ContextStack>>());
+
 thread_local! {
-    pub(crate) static STACK: RefCell<Vec<(CUcontext, hipDevice_t)>> = RefCell::new(Vec::new());
+    pub(crate) static STACK: RefCell<ContextStack> = const { RefCell::new(ContextStack::new()) };
 }
 
 pub(crate) struct Context {
@@ -127,8 +183,14 @@ impl<'a>
     }
 }
 
+// Accesses the thread-local context stack. `STACK` has no destructor, so this should never
+// fail, but never panic: a panic can't unwind across `extern "C"` and would abort the process.
+fn with_stack<T>(f: impl FnOnce(&RefCell<ContextStack>) -> T) -> Result<T, CUerror> {
+    STACK.try_with(f).map_err(|_| CUerror::DEINITIALIZED)
+}
+
 pub(crate) fn get_current_device() -> Result<hipDevice_t, CUerror> {
-    STACK.with(|stack| {
+    with_stack(|stack| {
         stack
             .try_borrow()
             .map_err(|_| CUerror::UNKNOWN)
@@ -137,11 +199,16 @@ pub(crate) fn get_current_device() -> Result<hipDevice_t, CUerror> {
                     .ok_or(CUerror::INVALID_CONTEXT)
                     .map(|(_, dev)| *dev)
             })
-    })
+    })?
 }
 
 pub(crate) fn get_current_context() -> Result<CUcontext, CUerror> {
-    if let Some(ctx) = STACK.with(|stack| stack.borrow().last().copied().map(|(ctx, _)| ctx)) {
+    if let Some(ctx) = with_stack(|stack| {
+        stack
+            .try_borrow()
+            .ok()
+            .and_then(|stack| stack.last().map(|(ctx, _)| *ctx))
+    })? {
         return Ok(ctx);
     }
     Err(CUerror::INVALID_CONTEXT)
@@ -190,9 +257,21 @@ impl Drop for SetDeviceOnDrop {
     }
 }
 
+// cuCtxSetCurrent replaces the top of the context stack, cuCtxPushCurrent and cuCtxCreate push
+// onto it. Both are equivalent to a pop when called with a null context
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StackOp {
+    Push,
+    ReplaceTop,
+}
+
 pub(crate) fn set_current(raw_ctx: CUcontext) -> CUresult {
+    set_current_impl(raw_ctx, StackOp::ReplaceTop)
+}
+
+fn set_current_impl(raw_ctx: CUcontext, op: StackOp) -> CUresult {
     let new_device = if raw_ctx.0 == ptr::null_mut() {
-        STACK.with(|stack| {
+        with_stack(|stack| {
             let mut stack = stack.borrow_mut();
             if let Some((_, old_device)) = stack.pop() {
                 if let Some((_, new_device)) = stack.last() {
@@ -202,20 +281,23 @@ pub(crate) fn set_current(raw_ctx: CUcontext) -> CUresult {
                 }
             }
             None
-        })
+        })?
     } else {
         let ctx: &Context = FromCuda::<_, CUerror>::from_cuda(&raw_ctx)?;
         let device = ctx.device;
-        STACK.with(move |stack| {
-            let mut stack = stack.borrow_mut();
+        with_stack(move |stack| {
+            let mut stack = stack.try_borrow_mut().map_err(|_| CUerror::UNKNOWN)?;
             let last_device = stack.last().map(|(_, dev)| *dev);
-            stack.push((raw_ctx, device));
-            match last_device {
+            match op {
+                StackOp::Push => stack.push((raw_ctx, device))?,
+                StackOp::ReplaceTop => stack.replace_last((raw_ctx, device)),
+            }
+            Ok::<_, CUerror>(match last_device {
                 None => Some(device),
                 Some(last_device) if last_device != device => Some(device),
                 _ => None,
-            }
-        })
+            })
+        })??
     };
     if let Some(dev) = new_device {
         unsafe { hipSetDevice(dev)? };
@@ -252,7 +334,7 @@ pub(crate) unsafe fn push_current(ctx: CUcontext) -> CUresult {
     if ctx == CUcontext(ptr::null_mut()) {
         return CUresult::ERROR_INVALID_VALUE;
     }
-    set_current(ctx)
+    set_current_impl(ctx, StackOp::Push)
 }
 
 pub(crate) unsafe fn push_current_v2(ctx: CUcontext) -> CUresult {
@@ -260,12 +342,12 @@ pub(crate) unsafe fn push_current_v2(ctx: CUcontext) -> CUresult {
 }
 
 pub(crate) unsafe fn pop_current(result: Option<&mut CUcontext>) -> CUresult {
-    let old_ctx_and_new_device = STACK.with(|stack| {
+    let old_ctx_and_new_device = with_stack(|stack| {
         let mut stack = stack.borrow_mut();
         stack
             .pop()
             .map(|(ctx, _)| (ctx, stack.last().map(|(_, dev)| *dev)))
-    });
+    })?;
     let ctx = match old_ctx_and_new_device {
         Some((old_ctx, new_device)) => {
             if let Some(new_device) = new_device {
@@ -288,7 +370,7 @@ pub(crate) unsafe fn create_v2(
 ) -> CUresult {
     let handle = Context::wrap(Context::new(dev)?);
     // TODO: optimize
-    set_current(handle)?;
+    set_current_impl(handle, StackOp::Push)?;
     *ctx = handle;
     Ok(())
 }
@@ -365,6 +447,45 @@ mod tests {
         api.cuInit(0);
         api.cuCtxCreate_v2(&mut unsafe { mem::zeroed() }, 0, 0);
         api.cuCtxPopCurrent_v2(ptr::null_mut());
+    }
+
+    #[test_cuda]
+    fn set_current_replaces_top_of_stack(api: impl CudaApi) {
+        api.cuInit(0);
+        let mut ctx1 = unsafe { mem::zeroed() };
+        let mut ctx2 = unsafe { mem::zeroed() };
+        api.cuCtxCreate_v2(&mut ctx1, 0, 0);
+        api.cuCtxCreate_v2(&mut ctx2, 0, 0);
+        // stack: [ctx1, ctx2] -> [ctx1, ctx1]
+        api.cuCtxSetCurrent(ctx1);
+        let mut popped = unsafe { mem::zeroed() };
+        api.cuCtxPopCurrent_v2(&mut popped);
+        assert_eq!(popped, ctx1);
+        let mut current = unsafe { mem::zeroed() };
+        api.cuCtxGetCurrent(&mut current);
+        assert_eq!(current, ctx1);
+        api.cuCtxPopCurrent_v2(&mut popped);
+        assert_eq!(popped, ctx1);
+        assert_eq!(
+            api.cuCtxPopCurrent_v2_unchecked(&mut popped),
+            CUresult::ERROR_INVALID_CONTEXT
+        );
+    }
+
+    #[test_cuda]
+    fn set_current_does_not_grow_stack(api: impl CudaApi) {
+        api.cuInit(0);
+        let mut ctx = unsafe { mem::zeroed() };
+        api.cuCtxCreate_v2(&mut ctx, 0, 0);
+        for _ in 0..1000 {
+            api.cuCtxSetCurrent(ctx);
+        }
+        let mut popped = unsafe { mem::zeroed() };
+        api.cuCtxPopCurrent_v2(&mut popped);
+        assert_eq!(
+            api.cuCtxPopCurrent_v2_unchecked(&mut popped),
+            CUresult::ERROR_INVALID_CONTEXT
+        );
     }
 
     #[test_cuda]

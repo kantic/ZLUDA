@@ -1,0 +1,20 @@
+[package]
+name = "zluda_rtc"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+name = "nvrtc"
+crate-type = ["cdylib"]
+
+[dependencies]
+libloading = "0.8"
+
+[target.'cfg(not(windows))'.dependencies]
+libc = "0.2"
+
+[package.metadata.zluda]
+linux_only = true
+linux_symlinks = [
+    "libnvrtc.so.12",
+]

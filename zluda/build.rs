@@ -8,6 +8,13 @@ fn main() {
         println!("cargo:rerun-if-changed={}", dll_path);
         check_lfs_file(dll_path);
     }
+    // Use the same SONAME as the NVIDIA driver. Some applications (e.g. Wolfram's MXNet
+    // build) link against libcuda.so.1 and have a DT_RPATH that contains a stub
+    // libcuda.so.1. DT_RPATH takes precedence over LD_LIBRARY_PATH, so the stub would be
+    // loaded unless a library with the SONAME libcuda.so.1 is already loaded.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
+        println!("cargo:rustc-cdylib-link-arg=-Wl,-soname,libcuda.so.1");
+    }
     let git = Gix::builder().sha(false).build();
     Emitter::default()
         .add_instructions(&git)

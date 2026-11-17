@@ -559,3 +559,315 @@ mod tests {
         api.cublasDestroy_v2(handle);
     }
 }
+
+pub(crate) unsafe fn set_atomics_mode(
+    handle: &Handle,
+    mode: rocblas_atomics_mode,
+) -> rocblas_status {
+    rocblas()?.rocblas_set_atomics_mode(handle.rocm_handle, mode)
+}
+
+pub(crate) unsafe fn get_atomics_mode(
+    handle: &Handle,
+    mode: *mut rocblas_atomics_mode,
+) -> rocblas_status {
+    rocblas()?.rocblas_get_atomics_mode(handle.rocm_handle, mode)
+}
+
+pub(crate) unsafe fn get_pointer_mode_v2(
+    handle: &Handle,
+    mode: *mut rocblas_pointer_mode,
+) -> rocblas_status {
+    rocblas()?.rocblas_get_pointer_mode(handle.rocm_handle, mode)
+}
+
+pub(crate) unsafe fn get_stream_v2(handle: &Handle, stream: *mut hipStream_t) -> rocblas_status {
+    rocblas()?.rocblas_get_stream(handle.rocm_handle, stream)
+}
+
+// We report the version of cuBLAS shipped with CUDA 12.8
+const CUBLAS_VER_MAJOR: i32 = 12;
+const CUBLAS_VER_MINOR: i32 = 8;
+const CUBLAS_VER_PATCH: i32 = 4;
+
+pub(crate) unsafe fn get_version_v2(_handle: &Handle, version: &mut ::core::ffi::c_int) -> cublasStatus_t {
+    *version = CUBLAS_VER_MAJOR * 10000 + CUBLAS_VER_MINOR * 100 + CUBLAS_VER_PATCH;
+    Ok(())
+}
+
+pub(crate) unsafe fn get_property(
+    type_: cuda_types::cublas::libraryPropertyType,
+    value: &mut ::core::ffi::c_int,
+) -> cublasStatus_t {
+    *value = match type_ {
+        cuda_types::cublas::libraryPropertyType::MAJOR_VERSION => CUBLAS_VER_MAJOR,
+        cuda_types::cublas::libraryPropertyType::MINOR_VERSION => CUBLAS_VER_MINOR,
+        cuda_types::cublas::libraryPropertyType::PATCH_LEVEL => CUBLAS_VER_PATCH,
+        _ => return cublasStatus_t::ERROR_INVALID_VALUE,
+    };
+    Ok(())
+}
+
+macro_rules! dot {
+    ($($name:ident => $roc:ident: $t:ty),*) => {
+        $(
+            pub(crate) unsafe fn $name(
+                handle: &Handle,
+                n: ::core::ffi::c_int,
+                x: *const $t,
+                incx: ::core::ffi::c_int,
+                y: *const $t,
+                incy: ::core::ffi::c_int,
+                result: *mut $t,
+            ) -> rocblas_status {
+                rocblas()?.$roc(handle.rocm_handle, n, x, incx, y, incy, result)
+            }
+        )*
+    };
+}
+
+dot!(sdot_v2 => rocblas_sdot: f32, ddot_v2 => rocblas_ddot: f64);
+
+pub(crate) unsafe fn dgemm_v2(
+    handle: &Handle,
+    transa: rocblas_operation,
+    transb: rocblas_operation,
+    m: ::core::ffi::c_int,
+    n: ::core::ffi::c_int,
+    k: ::core::ffi::c_int,
+    alpha: *const f64,
+    a: *const f64,
+    lda: ::core::ffi::c_int,
+    b: *const f64,
+    ldb: ::core::ffi::c_int,
+    beta: *const f64,
+    c: *mut f64,
+    ldc: ::core::ffi::c_int,
+) -> rocblas_status {
+    rocblas()?.rocblas_dgemm(
+        handle.rocm_handle,
+        transa,
+        transb,
+        m,
+        n,
+        k,
+        alpha,
+        a,
+        lda,
+        b,
+        ldb,
+        beta,
+        c,
+        ldc,
+    )
+}
+
+pub(crate) unsafe fn dgemm_strided_batched(
+    handle: &Handle,
+    transa: rocblas_operation,
+    transb: rocblas_operation,
+    m: ::core::ffi::c_int,
+    n: ::core::ffi::c_int,
+    k: ::core::ffi::c_int,
+    alpha: *const f64,
+    a: *const f64,
+    lda: ::core::ffi::c_int,
+    stride_a: ::core::ffi::c_longlong,
+    b: *const f64,
+    ldb: ::core::ffi::c_int,
+    stride_b: ::core::ffi::c_longlong,
+    beta: *const f64,
+    c: *mut f64,
+    ldc: ::core::ffi::c_int,
+    stride_c: ::core::ffi::c_longlong,
+    batch_count: ::core::ffi::c_int,
+) -> rocblas_status {
+    rocblas()?.rocblas_dgemm_strided_batched(
+        handle.rocm_handle,
+        transa,
+        transb,
+        m,
+        n,
+        k,
+        alpha,
+        a,
+        lda,
+        stride_a,
+        b,
+        ldb,
+        stride_b,
+        beta,
+        c,
+        ldc,
+        stride_c,
+        batch_count,
+    )
+}
+
+pub(crate) unsafe fn hgemm_strided_batched(
+    handle: &Handle,
+    transa: rocblas_operation,
+    transb: rocblas_operation,
+    m: ::core::ffi::c_int,
+    n: ::core::ffi::c_int,
+    k: ::core::ffi::c_int,
+    alpha: *const cuda_types::cublas::__half,
+    a: *const cuda_types::cublas::__half,
+    lda: ::core::ffi::c_int,
+    stride_a: ::core::ffi::c_longlong,
+    b: *const cuda_types::cublas::__half,
+    ldb: ::core::ffi::c_int,
+    stride_b: ::core::ffi::c_longlong,
+    beta: *const cuda_types::cublas::__half,
+    c: *mut cuda_types::cublas::__half,
+    ldc: ::core::ffi::c_int,
+    stride_c: ::core::ffi::c_longlong,
+    batch_count: ::core::ffi::c_int,
+) -> rocblas_status {
+    rocblas()?.rocblas_hgemm_strided_batched(
+        handle.rocm_handle,
+        transa,
+        transb,
+        m,
+        n,
+        k,
+        alpha.cast(),
+        a.cast(),
+        lda,
+        stride_a,
+        b.cast(),
+        ldb,
+        stride_b,
+        beta.cast(),
+        c.cast(),
+        ldc,
+        stride_c,
+        batch_count,
+    )
+}
+
+// cublasSgemmEx: alpha, beta and compute type are always f32, matrices can be of lower precision
+pub(crate) unsafe fn sgemm_ex(
+    handle: &Handle,
+    transa: rocblas_operation,
+    transb: rocblas_operation,
+    m: ::core::ffi::c_int,
+    n: ::core::ffi::c_int,
+    k: ::core::ffi::c_int,
+    alpha: *const f32,
+    a: *const ::core::ffi::c_void,
+    a_type: rocblas_datatype,
+    lda: ::core::ffi::c_int,
+    b: *const ::core::ffi::c_void,
+    b_type: rocblas_datatype,
+    ldb: ::core::ffi::c_int,
+    beta: *const f32,
+    c: *mut ::core::ffi::c_void,
+    c_type: rocblas_datatype,
+    ldc: ::core::ffi::c_int,
+) -> rocblas_status {
+    rocblas()?.rocblas_gemm_ex(
+        handle.rocm_handle,
+        transa,
+        transb,
+        m,
+        n,
+        k,
+        alpha.cast(),
+        a,
+        a_type,
+        lda,
+        b,
+        b_type,
+        ldb,
+        beta.cast(),
+        c,
+        c_type,
+        ldc,
+        c,
+        c_type,
+        ldc,
+        rocblas_datatype::rocblas_datatype_f32_r,
+        rocblas_gemm_algo::rocblas_gemm_algo_standard,
+        0,
+        0,
+    )
+}
+
+macro_rules! syrk {
+    ($($name:ident => $roc:ident: $t:ty),*) => {
+        $(
+            pub(crate) unsafe fn $name(
+                handle: &Handle,
+                uplo: rocblas_fill,
+                trans: rocblas_operation,
+                n: ::core::ffi::c_int,
+                k: ::core::ffi::c_int,
+                alpha: *const $t,
+                a: *const $t,
+                lda: ::core::ffi::c_int,
+                beta: *const $t,
+                c: *mut $t,
+                ldc: ::core::ffi::c_int,
+            ) -> rocblas_status {
+                rocblas()?.$roc(handle.rocm_handle, uplo, trans, n, k, alpha, a, lda, beta, c, ldc)
+            }
+        )*
+    };
+}
+
+syrk!(ssyrk_v2 => rocblas_ssyrk: f32, dsyrk_v2 => rocblas_dsyrk: f64);
+
+macro_rules! trmm {
+    ($($name:ident => $roc:ident: $t:ty),*) => {
+        $(
+            pub(crate) unsafe fn $name(
+                handle: &Handle,
+                side: rocblas_side,
+                uplo: rocblas_fill,
+                trans: rocblas_operation,
+                diag: rocblas_diagonal,
+                m: ::core::ffi::c_int,
+                n: ::core::ffi::c_int,
+                alpha: *const $t,
+                a: *const $t,
+                lda: ::core::ffi::c_int,
+                b: *const $t,
+                ldb: ::core::ffi::c_int,
+                c: *mut $t,
+                ldc: ::core::ffi::c_int,
+            ) -> rocblas_status {
+                rocblas()?.$roc(
+                    handle.rocm_handle, side, uplo, trans, diag, m, n, alpha, a, lda, b, ldb, c, ldc,
+                )
+            }
+        )*
+    };
+}
+
+trmm!(strmm_v2 => rocblas_strmm: f32, dtrmm_v2 => rocblas_dtrmm: f64);
+
+macro_rules! trsm {
+    ($($name:ident => $roc:ident: $t:ty),*) => {
+        $(
+            pub(crate) unsafe fn $name(
+                handle: &Handle,
+                side: rocblas_side,
+                uplo: rocblas_fill,
+                trans: rocblas_operation,
+                diag: rocblas_diagonal,
+                m: ::core::ffi::c_int,
+                n: ::core::ffi::c_int,
+                alpha: *const $t,
+                a: *const $t,
+                lda: ::core::ffi::c_int,
+                b: *mut $t,
+                ldb: ::core::ffi::c_int,
+            ) -> rocblas_status {
+                rocblas()?.$roc(handle.rocm_handle, side, uplo, trans, diag, m, n, alpha, a, lda, b, ldb)
+            }
+        )*
+    };
+}
+
+trsm!(strsm_v2 => rocblas_strsm: f32, dtrsm_v2 => rocblas_dtrsm: f64);

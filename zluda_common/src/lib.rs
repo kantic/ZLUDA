@@ -210,6 +210,7 @@ macro_rules! from_cuda_object {
 }
 
 from_cuda_nop!(
+    *const f64,
     *mut i8,
     *mut i32,
     *const i32,
@@ -285,6 +286,8 @@ from_cuda_nop!(
     CUsharedconfig
 );
 from_cuda_transmute!(
+    // CUBLAS_ATOMICS_NOT_ALLOWED = 0, CUBLAS_ATOMICS_ALLOWED = 1, same as rocBLAS
+    cublasAtomicsMode_t => rocblas_atomics_mode,
     CUuuid => hipUUID,
     CUstream => hipStream_t,
     CUpointer_attribute => hipPointer_attribute,
@@ -502,6 +505,37 @@ impl<'a, E: CudaErrorType> FromCuda<'a, *const ::core::ffi::c_void, E> for &'a :
             Some(x) => Ok(x),
             None => Err(E::INVALID_VALUE),
         }
+    }
+}
+
+impl<'a, E: CudaErrorType> FromCuda<'a, cublasFillMode_t, E> for rocblas_fill {
+    fn from_cuda(t: &'a cublasFillMode_t) -> Result<Self, E> {
+        Ok(match *t {
+            cublasFillMode_t::CUBLAS_FILL_MODE_LOWER => rocblas_fill::rocblas_fill_lower,
+            cublasFillMode_t::CUBLAS_FILL_MODE_UPPER => rocblas_fill::rocblas_fill_upper,
+            cublasFillMode_t::CUBLAS_FILL_MODE_FULL => rocblas_fill::rocblas_fill_full,
+            _ => return Err(E::INVALID_VALUE),
+        })
+    }
+}
+
+impl<'a, E: CudaErrorType> FromCuda<'a, cublasSideMode_t, E> for rocblas_side {
+    fn from_cuda(t: &'a cublasSideMode_t) -> Result<Self, E> {
+        Ok(match *t {
+            cublasSideMode_t::CUBLAS_SIDE_LEFT => rocblas_side::rocblas_side_left,
+            cublasSideMode_t::CUBLAS_SIDE_RIGHT => rocblas_side::rocblas_side_right,
+            _ => return Err(E::INVALID_VALUE),
+        })
+    }
+}
+
+impl<'a, E: CudaErrorType> FromCuda<'a, cublasDiagType_t, E> for rocblas_diagonal {
+    fn from_cuda(t: &'a cublasDiagType_t) -> Result<Self, E> {
+        Ok(match *t {
+            cublasDiagType_t::CUBLAS_DIAG_NON_UNIT => rocblas_diagonal::rocblas_diagonal_non_unit,
+            cublasDiagType_t::CUBLAS_DIAG_UNIT => rocblas_diagonal::rocblas_diagonal_unit,
+            _ => return Err(E::INVALID_VALUE),
+        })
     }
 }
 
