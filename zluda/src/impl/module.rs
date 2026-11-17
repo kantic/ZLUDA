@@ -44,6 +44,7 @@ impl ModuleMutable {
                     base: func_handle,
                     sm_version,
                     explicit_args_size_align,
+                    legacy: Default::default(),
                 });
                 &*entry.insert(func)
             }

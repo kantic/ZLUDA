@@ -5214,6 +5214,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "zluda_comgr"
+version = "0.0.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "zluda_common"
 version = "0.1.0"
 dependencies = [

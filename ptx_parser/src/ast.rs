@@ -853,6 +853,9 @@ ptx_parser_macros::generate_instruction_type!(
                 src2: T,
             }
         },
+        // The address is a memory operand like the source of `ld`. The relaxed type checking rules
+        // only apply to operands in the state space of the instruction, so they would reject the
+        // usual form, an address in a 64-bit register: `prefetch.global.L2 [%rd1]`
         Prefetch {
             type: !,
             data: PrefetchData,
@@ -861,7 +864,6 @@ ptx_parser_macros::generate_instruction_type!(
                     repr: T,
                     type: Type::from(ScalarType::B8),
                     space: { data.space },
-                    relaxed_type_check: true
                 }
             }
         },

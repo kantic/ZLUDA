@@ -29,6 +29,7 @@ members = [
     "zluda_blas",
     "zluda_blaslt",
     "zluda_cache",
+    "zluda_comgr",
     "zluda_common",
     "zluda_dnn",
     "zluda_dnn8",

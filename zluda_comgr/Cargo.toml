@@ -1,0 +1,13 @@
+[package]
+name = "zluda_comgr"
+version = "0.0.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[target.'cfg(not(windows))'.dependencies]
+libc = "0.2"
+
+[package.metadata.zluda]
+linux_only = true

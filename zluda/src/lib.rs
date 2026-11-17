@@ -138,6 +138,8 @@ cuda_macros::cuda_function_declarations!(
             cuFuncGetAttribute,
             cuFuncSetAttribute,
             cuFuncSetCacheConfig,
+            cuFuncSetBlockShape,
+            cuFuncSetSharedSize,
             cuGetErrorString,
             cuGetExportTable,
             cuGetProcAddress_v2,
@@ -234,7 +236,17 @@ cuda_macros::cuda_function_declarations!(
             cuTexRefSetFormat,
             cuThreadExchangeStreamCaptureMode,
         ],
-    implemented_in_function <= [cuLaunchKernel,],
+    implemented_in_function
+        <= [
+            cuLaunch,
+            cuLaunchGrid,
+            cuLaunchGridAsync,
+            cuLaunchKernel,
+            cuParamSetSize,
+            cuParamSetf,
+            cuParamSeti,
+            cuParamSetv,
+        ],
     implemented_windows
         <= [
             cuD3D11GetDevice,

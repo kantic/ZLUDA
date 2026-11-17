@@ -18,7 +18,7 @@ use std::{
     ffi::{c_void, CStr},
     mem::{self, ManuallyDrop, MaybeUninit},
     ptr,
-    str::Utf8Error,
+    str::{self, Utf8Error},
 };
 
 pub mod constants;
@@ -237,6 +237,8 @@ from_cuda_nop!(
     *mut f64,
     *mut float2,
     *mut double2,
+    *const float2,
+    *const double2,
     *const ::core::ffi::c_void,
     *const *const ::core::ffi::c_void,
     *const *mut ::core::ffi::c_void,
@@ -1312,6 +1314,32 @@ pub enum CodeLibraryRef<'a> {
     Archive(&'a c_void),
 }
 
+/// Returns the PTX source in a text module image.
+///
+/// Images are NUL-terminated, but some callers (Wolfram's CUDALink) pass the contents of a .ptx file
+/// without a terminator, so the text is followed by whatever happens to be in memory up to the next
+/// NUL byte. If the image contains bytes that can't be part of PTX source (control characters or
+/// invalid UTF-8), only the text before them is used, up to the end of the last block or statement.
+fn ptx_text(bytes: &[u8]) -> Result<&str, Utf8Error> {
+    let is_junk = |b: &u8| matches!(b, 0x00..=0x08 | 0x0b | 0x0c | 0x0e..=0x1f | 0x7f);
+    let text_end = bytes.iter().position(is_junk).unwrap_or(bytes.len());
+    let (text, truncated) = match str::from_utf8(&bytes[..text_end]) {
+        Ok(text) => (text, text_end < bytes.len()),
+        Err(err) => (
+            unsafe { str::from_utf8_unchecked(&bytes[..err.valid_up_to()]) },
+            true,
+        ),
+    };
+    if !truncated {
+        return Ok(text);
+    }
+    match text.rfind(['}', ';']) {
+        Some(last) => Ok(&text[..=last]),
+        // Not PTX followed by junk, report the original error
+        None => str::from_utf8(bytes),
+    }
+}
+
 impl<'a> CodeLibraryRef<'a> {
     const ELFMAG: [u8; 4] = *b"\x7FELF";
     const AR_MAGIC: [u8; 8] = *b"!<arch>\x0A";
@@ -1327,7 +1355,7 @@ impl<'a> CodeLibraryRef<'a> {
             Self::ELFMAG => Self::Elf(&*ptr),
             _ => match *ptr.cast::<[u8; 8]>() {
                 Self::AR_MAGIC => Self::Archive(&*ptr),
-                _ => CStr::from_ptr(ptr.cast()).to_str().map(Self::Text)?,
+                _ => ptx_text(CStr::from_ptr(ptr.cast()).to_bytes()).map(Self::Text)?,
             },
         })
     }
@@ -1402,4 +1430,29 @@ pub enum CodeModuleRef<'a> {
     Text(&'a str),
     Elf(*const c_void),
     Archive(*const c_void),
+}
+
+#[cfg(test)]
+mod ptx_text_tests {
+    use super::ptx_text;
+
+    #[test]
+    fn terminated_text_is_unchanged() {
+        let ptx = ".version 6.5\n// comment \u{a9}\n.entry f()\n{\n\tret;\n}\n\n";
+        assert_eq!(ptx_text(ptx.as_bytes()), Ok(ptx));
+    }
+
+    #[test]
+    fn junk_after_unterminated_text_is_dropped() {
+        // CUDALink passes the file contents without a NUL terminator
+        let image = b".entry f()\n{\n\tret;\n}\n\nU\x01";
+        assert_eq!(ptx_text(image), Ok(".entry f()\n{\n\tret;\n}"));
+        let image = b".global .u32 x;\n\xe0\x90abc";
+        assert_eq!(ptx_text(image), Ok(".global .u32 x;"));
+    }
+
+    #[test]
+    fn binary_data_is_an_error() {
+        assert!(ptx_text(b"\xff\xfe\x01").is_err());
+    }
 }

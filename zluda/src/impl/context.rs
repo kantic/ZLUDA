@@ -385,6 +385,16 @@ pub(crate) unsafe fn create_v4(
 }
 
 pub(crate) unsafe fn destroy_v2(ctx: CUcontext) -> CUresult {
+    // Primary contexts live inside their device and can't be freed. Wolfram's CUDALink calls
+    // cuCtxDestroy on the context it finds current, which is the primary context when the runtime
+    // API was used first.
+    let is_primary = super::driver::global_state()?
+        .devices
+        .iter()
+        .any(|device| device.primary_context().1 == ctx);
+    if is_primary {
+        return CUresult::ERROR_INVALID_CONTEXT;
+    }
     zluda_common::drop_checked::<Context>(ctx)
 }
 
@@ -432,6 +442,26 @@ mod tests {
     use crate::tests::CudaApi;
     use cuda_macros::test_cuda;
     use std::mem;
+
+    #[test_cuda]
+    fn destroy_primary_context_keeps_it_usable(api: impl CudaApi) {
+        api.cuInit(0);
+        let mut primary = unsafe { mem::zeroed() };
+        api.cuDevicePrimaryCtxRetain(&mut primary, 0);
+        api.cuCtxSetCurrent(primary);
+        // Rejected by ZLUDA; must not crash, and the primary context must stay valid
+        let _ = api.cuCtxDestroy_v2_unchecked(primary);
+        let mut again = unsafe { mem::zeroed() };
+        api.cuDevicePrimaryCtxRetain(&mut again, 0);
+        api.cuCtxSetCurrent(again);
+        let mut ptr = unsafe { mem::zeroed() };
+        api.cuMemAlloc_v2(&mut ptr, 64);
+        api.cuMemFree_v2(ptr);
+        // Leave the primary context inactive for other tests in this process
+        api.cuCtxSetCurrent(CUcontext(std::ptr::null_mut()));
+        api.cuDevicePrimaryCtxRelease_v2(0);
+        api.cuDevicePrimaryCtxRelease_v2(0);
+    }
 
     #[test_cuda]
     fn empty_pop_fails(api: impl CudaApi) {
