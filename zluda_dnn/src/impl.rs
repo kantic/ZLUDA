@@ -14,6 +14,12 @@ use std::{
 };
 use zluda_common::{from_cuda_object, ZludaObject};
 
+mod backend;
+pub(crate) use backend::{
+    backend_create_descriptor, backend_destroy_descriptor, backend_execute, backend_finalize,
+    backend_get_attribute, backend_initialize, backend_set_attribute,
+};
+
 fn miopen() -> Result<&'static super::MIOpenVtable, miopenError_t> {
     static LOCK: OnceLock<Result<super::MIOpenVtable, miopenError_t>> = OnceLock::new();
     let unwrapped: &Result<super::MIOpenVtable, miopenError_t> =
@@ -1381,6 +1387,618 @@ pub(crate) unsafe fn restore_dropout_descriptor(
         false,
         false,
         miopenRNGType_t::MIOPEN_RNG_PSEUDO_XORWOW,
+    )
+}
+
+pub(crate) unsafe fn create_activation_descriptor(
+    activation_desc: &mut miopenActivationDescriptor_t,
+) -> miopenStatus_t {
+    miopen()?.miopenCreateActivationDescriptor(activation_desc)
+}
+
+pub(crate) unsafe fn set_activation_descriptor(
+    activation_desc: miopenActivationDescriptor_t,
+    mode: cudnnActivationMode_t,
+    _relu_nan_opt: cudnnNanPropagation_t,
+    coef: f64,
+) -> miopenStatus_t {
+    // MIOpen activations are parametrized with (alpha, beta, gamma):
+    // TANH: beta * tanh(alpha * x), CLIPPEDRELU: min(alpha, max(0, x)),
+    // ELU: x > 0 ? x : alpha * (exp(x) - 1)
+    let (mode, alpha, beta, gamma) = match mode {
+        cudnnActivationMode_t::CUDNN_ACTIVATION_SIGMOID => (
+            miopenActivationMode_t::miopenActivationLOGISTIC,
+            0.0,
+            0.0,
+            0.0,
+        ),
+        cudnnActivationMode_t::CUDNN_ACTIVATION_RELU => {
+            (miopenActivationMode_t::miopenActivationRELU, 0.0, 0.0, 0.0)
+        }
+        cudnnActivationMode_t::CUDNN_ACTIVATION_TANH => {
+            (miopenActivationMode_t::miopenActivationTANH, 1.0, 1.0, 0.0)
+        }
+        cudnnActivationMode_t::CUDNN_ACTIVATION_CLIPPED_RELU => (
+            miopenActivationMode_t::miopenActivationCLIPPEDRELU,
+            coef,
+            0.0,
+            0.0,
+        ),
+        cudnnActivationMode_t::CUDNN_ACTIVATION_ELU => {
+            (miopenActivationMode_t::miopenActivationELU, coef, 0.0, 0.0)
+        }
+        cudnnActivationMode_t::CUDNN_ACTIVATION_IDENTITY => (
+            miopenActivationMode_t::miopenActivationPASTHRU,
+            0.0,
+            0.0,
+            0.0,
+        ),
+        _ => return Err(miopenError_t::NotImplemented),
+    };
+    miopen()?.miopenSetActivationDescriptor(activation_desc, mode, alpha, beta, gamma)
+}
+
+pub(crate) unsafe fn destroy_activation_descriptor(
+    activation_desc: miopenActivationDescriptor_t,
+) -> miopenStatus_t {
+    miopen()?.miopenDestroyActivationDescriptor(activation_desc)
+}
+
+pub(crate) unsafe fn activation_forward(
+    handle: &Context,
+    activation_desc: miopenActivationDescriptor_t,
+    alpha: *const ::core::ffi::c_void,
+    x_desc: miopenTensorDescriptor_t,
+    x: *const ::core::ffi::c_void,
+    beta: *const ::core::ffi::c_void,
+    y_desc: miopenTensorDescriptor_t,
+    y: *mut ::core::ffi::c_void,
+) -> miopenStatus_t {
+    miopen()?.miopenActivationForward(
+        handle.base,
+        activation_desc,
+        alpha,
+        x_desc,
+        x,
+        beta,
+        y_desc,
+        y,
+    )
+}
+
+pub(crate) unsafe fn activation_backward(
+    handle: &Context,
+    activation_desc: miopenActivationDescriptor_t,
+    alpha: *const ::core::ffi::c_void,
+    y_desc: miopenTensorDescriptor_t,
+    y: *const ::core::ffi::c_void,
+    dy_desc: miopenTensorDescriptor_t,
+    dy: *const ::core::ffi::c_void,
+    x_desc: miopenTensorDescriptor_t,
+    x: *const ::core::ffi::c_void,
+    beta: *const ::core::ffi::c_void,
+    dx_desc: miopenTensorDescriptor_t,
+    dx: *mut ::core::ffi::c_void,
+) -> miopenStatus_t {
+    miopen()?.miopenActivationBackward(
+        handle.base,
+        activation_desc,
+        alpha,
+        y_desc,
+        y,
+        dy_desc,
+        dy,
+        x_desc,
+        x,
+        beta,
+        dx_desc,
+        dx,
+    )
+}
+
+pub(crate) unsafe fn create_pooling_descriptor(
+    pooling_desc: &mut miopenPoolingDescriptor_t,
+) -> miopenStatus_t {
+    let miopen = miopen()?;
+    miopen.miopenCreatePoolingDescriptor(pooling_desc)?;
+    // The default index type (uint8) limits the pooling window to 256 elements
+    miopen.miopenSetPoolingIndexType(*pooling_desc, miopenIndexType_t::miopenIndexUint32)
+}
+
+pub(crate) unsafe fn set_pooling2d_descriptor(
+    pooling_desc: miopenPoolingDescriptor_t,
+    mode: miopenPoolingMode_t,
+    _maxpooling_nan_opt: cudnnNanPropagation_t,
+    window_height: ::core::ffi::c_int,
+    window_width: ::core::ffi::c_int,
+    vertical_padding: ::core::ffi::c_int,
+    horizontal_padding: ::core::ffi::c_int,
+    vertical_stride: ::core::ffi::c_int,
+    horizontal_stride: ::core::ffi::c_int,
+) -> miopenStatus_t {
+    miopen()?.miopenSet2dPoolingDescriptor(
+        pooling_desc,
+        mode,
+        window_height,
+        window_width,
+        vertical_padding,
+        horizontal_padding,
+        vertical_stride,
+        horizontal_stride,
+    )
+}
+
+pub(crate) unsafe fn set_pooling_nd_descriptor(
+    pooling_desc: miopenPoolingDescriptor_t,
+    mode: miopenPoolingMode_t,
+    _maxpooling_nan_opt: cudnnNanPropagation_t,
+    nb_dims: ::core::ffi::c_int,
+    window_dim_a: *const ::core::ffi::c_int,
+    padding_a: *const ::core::ffi::c_int,
+    stride_a: *const ::core::ffi::c_int,
+) -> miopenStatus_t {
+    miopen()?.miopenSetNdPoolingDescriptor(
+        pooling_desc,
+        mode,
+        nb_dims,
+        window_dim_a,
+        padding_a,
+        stride_a,
+    )
+}
+
+pub(crate) unsafe fn destroy_pooling_descriptor(
+    pooling_desc: miopenPoolingDescriptor_t,
+) -> miopenStatus_t {
+    miopen()?.miopenDestroyPoolingDescriptor(pooling_desc)
+}
+
+pub(crate) unsafe fn pooling_forward(
+    handle: &Context,
+    pooling_desc: miopenPoolingDescriptor_t,
+    alpha: *const ::core::ffi::c_void,
+    x_desc: miopenTensorDescriptor_t,
+    x: *const ::core::ffi::c_void,
+    beta: *const ::core::ffi::c_void,
+    y_desc: miopenTensorDescriptor_t,
+    y: *mut ::core::ffi::c_void,
+) -> miopenStatus_t {
+    miopen()?.miopenPoolingForward(
+        handle.base,
+        pooling_desc,
+        alpha,
+        x_desc,
+        x,
+        beta,
+        y_desc,
+        y,
+        false,
+        ptr::null_mut(),
+        0,
+    )
+}
+
+const TEMPORARY_BUFFER_ALIGNMENT: usize = 256;
+
+pub(crate) unsafe fn pooling_backward(
+    handle: &Context,
+    pooling_desc: miopenPoolingDescriptor_t,
+    alpha: *const ::core::ffi::c_void,
+    y_desc: miopenTensorDescriptor_t,
+    y: *const ::core::ffi::c_void,
+    dy_desc: miopenTensorDescriptor_t,
+    dy: *const ::core::ffi::c_void,
+    x_desc: miopenTensorDescriptor_t,
+    x: *const ::core::ffi::c_void,
+    beta: *const ::core::ffi::c_void,
+    dx_desc: miopenTensorDescriptor_t,
+    dx: *mut ::core::ffi::c_void,
+) -> miopenStatus_t {
+    let _ = y;
+    let miopen = miopen()?;
+    // cuDNN computes the pooling gradient from x and y, MIOpen needs the workspace (indices of
+    // the maximum elements) filled by the forward pass. Re-run the forward pass into temporary
+    // buffers to obtain it.
+    let mut workspace_size = 0;
+    miopen.miopenPoolingGetWorkSpaceSizeV2(pooling_desc, y_desc, &mut workspace_size)?;
+    let mut y_size = 0;
+    miopen.miopenGetTensorNumBytes(y_desc, &mut y_size)?;
+    let workspace_offset = y_size.next_multiple_of(TEMPORARY_BUFFER_ALIGNMENT);
+    let stream = handle.stream.load(Ordering::Acquire);
+    let search_workspace = &mut *handle
+        .search_workspace
+        .lock()
+        .map_err(|_| miopenError_t::UnknownError)?;
+    search_workspace.beta_buffer_cache.with_async_buffer(
+        workspace_offset + workspace_size.max(1),
+        hipStream_t(stream),
+        |temp_buffer| {
+            let temp_y = temp_buffer;
+            let workspace = temp_buffer.cast::<u8>().add(workspace_offset).cast();
+            // alpha = 1, beta = 0. Scaling factors are f64 for double tensors and f32
+            // otherwise. A zeroed f64 is also a valid f32 zero, so only alpha needs both types
+            let one = [1.0f64];
+            let zero = [0.0f64];
+            let one_f32 = [1.0f32];
+            let mut data_type = mem::zeroed();
+            let mut _unused = [0i32; 8];
+            miopen.miopenGetTensorDescriptor(
+                y_desc,
+                &mut data_type,
+                _unused.as_mut_ptr(),
+                _unused.as_mut_ptr(),
+            )?;
+            let one_ptr: *const ::core::ffi::c_void = if data_type == miopenDataType_t::miopenDouble
+            {
+                one.as_ptr().cast()
+            } else {
+                one_f32.as_ptr().cast()
+            };
+            miopen.miopenPoolingForward(
+                handle.base,
+                pooling_desc,
+                one_ptr,
+                x_desc,
+                x,
+                zero.as_ptr().cast(),
+                y_desc,
+                temp_y,
+                true,
+                workspace,
+                workspace_size,
+            )?;
+            miopen.miopenPoolingBackward(
+                handle.base,
+                pooling_desc,
+                alpha,
+                y_desc,
+                temp_y,
+                dy_desc,
+                dy,
+                x_desc,
+                x,
+                beta,
+                dx_desc,
+                dx,
+                workspace,
+            )
+        },
+    )
+}
+
+pub(crate) unsafe fn derive_b_n_tensor_descriptor(
+    derived_bn_desc: miopenTensorDescriptor_t,
+    x_desc: miopenTensorDescriptor_t,
+    mode: miopenBatchNormMode_t,
+) -> miopenStatus_t {
+    miopen()?.miopenDeriveBNTensorDescriptor(derived_bn_desc, x_desc, mode)
+}
+
+pub(crate) unsafe fn get_batch_normalization_forward_training_ex_workspace_size(
+    _handle: &Context,
+    _mode: miopenBatchNormMode_t,
+    bn_ops: cudnnBatchNormOps_t,
+    _x_desc: miopenTensorDescriptor_t,
+    _z_desc: miopenTensorDescriptor_t,
+    _y_desc: miopenTensorDescriptor_t,
+    _bn_scale_bias_mean_var_desc: miopenTensorDescriptor_t,
+    _activation_desc: miopenActivationDescriptor_t,
+    size_in_bytes: &mut usize,
+) -> miopenStatus_t {
+    check_bn_ops(bn_ops)?;
+    *size_in_bytes = 0;
+    Ok(())
+}
+
+pub(crate) unsafe fn get_batch_normalization_backward_ex_workspace_size(
+    _handle: &Context,
+    _mode: miopenBatchNormMode_t,
+    bn_ops: cudnnBatchNormOps_t,
+    _x_desc: miopenTensorDescriptor_t,
+    _y_desc: miopenTensorDescriptor_t,
+    _dy_desc: miopenTensorDescriptor_t,
+    _dz_desc: miopenTensorDescriptor_t,
+    _dx_desc: miopenTensorDescriptor_t,
+    _d_bn_scale_bias_desc: miopenTensorDescriptor_t,
+    _activation_desc: miopenActivationDescriptor_t,
+    size_in_bytes: &mut usize,
+) -> miopenStatus_t {
+    check_bn_ops(bn_ops)?;
+    *size_in_bytes = 0;
+    Ok(())
+}
+
+pub(crate) unsafe fn get_batch_normalization_training_ex_reserve_space_size(
+    _handle: &Context,
+    _mode: miopenBatchNormMode_t,
+    bn_ops: cudnnBatchNormOps_t,
+    _activation_desc: miopenActivationDescriptor_t,
+    _x_desc: miopenTensorDescriptor_t,
+    size_in_bytes: &mut usize,
+) -> miopenStatus_t {
+    check_bn_ops(bn_ops)?;
+    *size_in_bytes = 0;
+    Ok(())
+}
+
+// Only plain batch normalization is supported, fused activations are not
+fn check_bn_ops(bn_ops: cudnnBatchNormOps_t) -> miopenStatus_t {
+    if bn_ops == cudnnBatchNormOps_t::CUDNN_BATCHNORM_OPS_BN {
+        Ok(())
+    } else {
+        Err(miopenError_t::NotImplemented)
+    }
+}
+
+pub(crate) unsafe fn batch_normalization_forward_training(
+    handle: &Context,
+    mode: miopenBatchNormMode_t,
+    alpha: *const ::core::ffi::c_void,
+    beta: *const ::core::ffi::c_void,
+    x_desc: miopenTensorDescriptor_t,
+    x: *const ::core::ffi::c_void,
+    y_desc: miopenTensorDescriptor_t,
+    y: *mut ::core::ffi::c_void,
+    bn_scale_bias_mean_var_desc: miopenTensorDescriptor_t,
+    bn_scale: *const ::core::ffi::c_void,
+    bn_bias: *const ::core::ffi::c_void,
+    exponential_average_factor: f64,
+    result_running_mean: *mut ::core::ffi::c_void,
+    result_running_variance: *mut ::core::ffi::c_void,
+    epsilon: f64,
+    result_save_mean: *mut ::core::ffi::c_void,
+    result_save_inv_variance: *mut ::core::ffi::c_void,
+) -> miopenStatus_t {
+    // Like cuDNN, MIOpen saves the inverse standard deviation in resultSaveInvVariance
+    miopen()?.miopenBatchNormalizationForwardTraining(
+        handle.base,
+        mode,
+        alpha.cast_mut(),
+        beta.cast_mut(),
+        x_desc,
+        x,
+        y_desc,
+        y,
+        bn_scale_bias_mean_var_desc,
+        bn_scale.cast_mut(),
+        bn_bias.cast_mut(),
+        exponential_average_factor,
+        result_running_mean,
+        result_running_variance,
+        epsilon,
+        result_save_mean,
+        result_save_inv_variance,
+    )
+}
+
+pub(crate) unsafe fn batch_normalization_forward_training_ex(
+    handle: &Context,
+    mode: miopenBatchNormMode_t,
+    bn_ops: cudnnBatchNormOps_t,
+    alpha: *const ::core::ffi::c_void,
+    beta: *const ::core::ffi::c_void,
+    x_desc: miopenTensorDescriptor_t,
+    x_data: *const ::core::ffi::c_void,
+    _z_desc: miopenTensorDescriptor_t,
+    z_data: *const ::core::ffi::c_void,
+    y_desc: miopenTensorDescriptor_t,
+    y_data: *mut ::core::ffi::c_void,
+    bn_scale_bias_mean_var_desc: miopenTensorDescriptor_t,
+    bn_scale: *const ::core::ffi::c_void,
+    bn_bias: *const ::core::ffi::c_void,
+    exponential_average_factor: f64,
+    result_running_mean: *mut ::core::ffi::c_void,
+    result_running_variance: *mut ::core::ffi::c_void,
+    epsilon: f64,
+    result_save_mean: *mut ::core::ffi::c_void,
+    result_save_inv_variance: *mut ::core::ffi::c_void,
+    activation_desc: miopenActivationDescriptor_t,
+    _workspace: *mut ::core::ffi::c_void,
+    _work_space_size_in_bytes: usize,
+    _reserve_space: *mut ::core::ffi::c_void,
+    _reserve_space_size_in_bytes: usize,
+) -> miopenStatus_t {
+    check_bn_ops(bn_ops)?;
+    if !z_data.is_null() || !activation_desc.0.is_null() {
+        return Err(miopenError_t::NotImplemented);
+    }
+    batch_normalization_forward_training(
+        handle,
+        mode,
+        alpha,
+        beta,
+        x_desc,
+        x_data,
+        y_desc,
+        y_data,
+        bn_scale_bias_mean_var_desc,
+        bn_scale,
+        bn_bias,
+        exponential_average_factor,
+        result_running_mean,
+        result_running_variance,
+        epsilon,
+        result_save_mean,
+        result_save_inv_variance,
+    )
+}
+
+pub(crate) unsafe fn batch_normalization_forward_inference(
+    handle: &Context,
+    mode: miopenBatchNormMode_t,
+    alpha: *const ::core::ffi::c_void,
+    beta: *const ::core::ffi::c_void,
+    x_desc: miopenTensorDescriptor_t,
+    x: *const ::core::ffi::c_void,
+    y_desc: miopenTensorDescriptor_t,
+    y: *mut ::core::ffi::c_void,
+    bn_scale_bias_mean_var_desc: miopenTensorDescriptor_t,
+    bn_scale: *const ::core::ffi::c_void,
+    bn_bias: *const ::core::ffi::c_void,
+    estimated_mean: *const ::core::ffi::c_void,
+    estimated_variance: *const ::core::ffi::c_void,
+    epsilon: f64,
+) -> miopenStatus_t {
+    miopen()?.miopenBatchNormalizationForwardInference(
+        handle.base,
+        mode,
+        alpha.cast_mut(),
+        beta.cast_mut(),
+        x_desc,
+        x,
+        y_desc,
+        y,
+        bn_scale_bias_mean_var_desc,
+        bn_scale.cast_mut(),
+        bn_bias.cast_mut(),
+        estimated_mean.cast_mut(),
+        estimated_variance.cast_mut(),
+        epsilon,
+    )
+}
+
+pub(crate) unsafe fn batch_normalization_backward(
+    handle: &Context,
+    mode: miopenBatchNormMode_t,
+    alpha_data_diff: *const ::core::ffi::c_void,
+    beta_data_diff: *const ::core::ffi::c_void,
+    alpha_param_diff: *const ::core::ffi::c_void,
+    beta_param_diff: *const ::core::ffi::c_void,
+    x_desc: miopenTensorDescriptor_t,
+    x: *const ::core::ffi::c_void,
+    dy_desc: miopenTensorDescriptor_t,
+    dy: *const ::core::ffi::c_void,
+    dx_desc: miopenTensorDescriptor_t,
+    dx: *mut ::core::ffi::c_void,
+    d_bn_scale_bias_desc: miopenTensorDescriptor_t,
+    bn_scale: *const ::core::ffi::c_void,
+    d_bn_scale_result: *mut ::core::ffi::c_void,
+    d_bn_bias_result: *mut ::core::ffi::c_void,
+    epsilon: f64,
+    saved_mean: *const ::core::ffi::c_void,
+    saved_inv_variance: *const ::core::ffi::c_void,
+) -> miopenStatus_t {
+    miopen()?.miopenBatchNormalizationBackward(
+        handle.base,
+        mode,
+        alpha_data_diff,
+        beta_data_diff,
+        alpha_param_diff,
+        beta_param_diff,
+        x_desc,
+        x,
+        dy_desc,
+        dy,
+        dx_desc,
+        dx,
+        d_bn_scale_bias_desc,
+        bn_scale,
+        d_bn_scale_result,
+        d_bn_bias_result,
+        epsilon,
+        saved_mean,
+        saved_inv_variance,
+    )
+}
+
+pub(crate) unsafe fn batch_normalization_backward_ex(
+    handle: &Context,
+    mode: miopenBatchNormMode_t,
+    bn_ops: cudnnBatchNormOps_t,
+    alpha_data_diff: *const ::core::ffi::c_void,
+    beta_data_diff: *const ::core::ffi::c_void,
+    alpha_param_diff: *const ::core::ffi::c_void,
+    beta_param_diff: *const ::core::ffi::c_void,
+    x_desc: miopenTensorDescriptor_t,
+    x_data: *const ::core::ffi::c_void,
+    _y_desc: miopenTensorDescriptor_t,
+    _y_data: *const ::core::ffi::c_void,
+    dy_desc: miopenTensorDescriptor_t,
+    dy_data: *const ::core::ffi::c_void,
+    _dz_desc: miopenTensorDescriptor_t,
+    dz_data: *mut ::core::ffi::c_void,
+    dx_desc: miopenTensorDescriptor_t,
+    dx_data: *mut ::core::ffi::c_void,
+    d_bn_scale_bias_desc: miopenTensorDescriptor_t,
+    bn_scale_data: *const ::core::ffi::c_void,
+    _bn_bias_data: *const ::core::ffi::c_void,
+    d_bn_scale_data: *mut ::core::ffi::c_void,
+    d_bn_bias_data: *mut ::core::ffi::c_void,
+    epsilon: f64,
+    saved_mean: *const ::core::ffi::c_void,
+    saved_inv_variance: *const ::core::ffi::c_void,
+    activation_desc: miopenActivationDescriptor_t,
+    _work_space: *mut ::core::ffi::c_void,
+    _work_space_size_in_bytes: usize,
+    _reserve_space: *mut ::core::ffi::c_void,
+    _reserve_space_size_in_bytes: usize,
+) -> miopenStatus_t {
+    check_bn_ops(bn_ops)?;
+    if !dz_data.is_null() || !activation_desc.0.is_null() {
+        return Err(miopenError_t::NotImplemented);
+    }
+    batch_normalization_backward(
+        handle,
+        mode,
+        alpha_data_diff,
+        beta_data_diff,
+        alpha_param_diff,
+        beta_param_diff,
+        x_desc,
+        x_data,
+        dy_desc,
+        dy_data,
+        dx_desc,
+        dx_data,
+        d_bn_scale_bias_desc,
+        bn_scale_data,
+        d_bn_scale_data,
+        d_bn_bias_data,
+        epsilon,
+        saved_mean,
+        saved_inv_variance,
+    )
+}
+
+pub(crate) unsafe fn softmax_forward(
+    handle: &Context,
+    algo: miopenSoftmaxAlgorithm_t,
+    mode: miopenSoftmaxMode_t,
+    alpha: *const ::core::ffi::c_void,
+    x_desc: miopenTensorDescriptor_t,
+    x: *const ::core::ffi::c_void,
+    beta: *const ::core::ffi::c_void,
+    y_desc: miopenTensorDescriptor_t,
+    y: *mut ::core::ffi::c_void,
+) -> miopenStatus_t {
+    miopen()?.miopenSoftmaxForward_V2(handle.base, alpha, x_desc, x, beta, y_desc, y, algo, mode)
+}
+
+pub(crate) unsafe fn softmax_backward(
+    handle: &Context,
+    algo: miopenSoftmaxAlgorithm_t,
+    mode: miopenSoftmaxMode_t,
+    alpha: *const ::core::ffi::c_void,
+    y_desc: miopenTensorDescriptor_t,
+    y: *const ::core::ffi::c_void,
+    dy_desc: miopenTensorDescriptor_t,
+    dy: *const ::core::ffi::c_void,
+    beta: *const ::core::ffi::c_void,
+    dx_desc: miopenTensorDescriptor_t,
+    dx: *mut ::core::ffi::c_void,
+) -> miopenStatus_t {
+    miopen()?.miopenSoftmaxBackward_V2(
+        handle.base,
+        alpha,
+        y_desc,
+        y,
+        dy_desc,
+        dy,
+        beta,
+        dx_desc,
+        dx,
+        algo,
+        mode,
     )
 }
 

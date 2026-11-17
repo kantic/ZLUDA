@@ -210,6 +210,13 @@ macro_rules! from_cuda_object {
 }
 
 from_cuda_nop!(
+    f64,
+    cudnn9::cudnnBackendDescriptorType_t,
+    cudnn9::cudnnBackendAttributeName_t,
+    cudnn9::cudnnBackendAttributeType_t,
+    cudnn9::cudnnActivationMode_t,
+    cudnn9::cudnnNanPropagation_t,
+    cudnn9::cudnnBatchNormOps_t,
     *const f64,
     *mut i8,
     *mut i32,
@@ -308,6 +315,8 @@ from_cuda_transmute!(
     cudnn9::cudnnFilterDescriptor_t => miopenTensorDescriptor_t,
     cudnn9::cudnnConvolutionDescriptor_t => miopenConvolutionDescriptor_t,
     cudnn9::cudnnDropoutDescriptor_t => miopenDropoutDescriptor_t,
+    cudnn9::cudnnActivationDescriptor_t => miopenActivationDescriptor_t,
+    cudnn9::cudnnPoolingDescriptor_t => miopenPoolingDescriptor_t,
     cusparseHandle_t => rocsparse_handle,
     cusparseMatrixType_t => rocsparse_matrix_type,
     cusparseConstSpMatDescr_t => rocsparse_const_spmat_descr,
@@ -916,6 +925,73 @@ impl<'a, E: CudaErrorType> FromCuda<'a, cudnn9::cudnnConvolutionMode_t, E>
         Ok(match *format {
             cudnn9::cudnnConvolutionMode_t::CUDNN_CROSS_CORRELATION => {
                 miopenConvolutionMode_t::miopenConvolution
+            }
+            _ => return Err(E::NOT_SUPPORTED),
+        })
+    }
+}
+
+impl<'a, E: CudaErrorType> FromCuda<'a, cudnn9::cudnnPoolingMode_t, E> for miopenPoolingMode_t {
+    fn from_cuda(mode: &'a cudnn9::cudnnPoolingMode_t) -> Result<Self, E> {
+        Ok(match *mode {
+            cudnn9::cudnnPoolingMode_t::CUDNN_POOLING_MAX
+            | cudnn9::cudnnPoolingMode_t::CUDNN_POOLING_MAX_DETERMINISTIC => {
+                miopenPoolingMode_t::miopenPoolingMax
+            }
+            cudnn9::cudnnPoolingMode_t::CUDNN_POOLING_AVERAGE_COUNT_INCLUDE_PADDING => {
+                miopenPoolingMode_t::miopenPoolingAverageInclusive
+            }
+            cudnn9::cudnnPoolingMode_t::CUDNN_POOLING_AVERAGE_COUNT_EXCLUDE_PADDING => {
+                miopenPoolingMode_t::miopenPoolingAverage
+            }
+            _ => return Err(E::NOT_SUPPORTED),
+        })
+    }
+}
+
+impl<'a, E: CudaErrorType> FromCuda<'a, cudnn9::cudnnBatchNormMode_t, E> for miopenBatchNormMode_t {
+    fn from_cuda(mode: &'a cudnn9::cudnnBatchNormMode_t) -> Result<Self, E> {
+        Ok(match *mode {
+            cudnn9::cudnnBatchNormMode_t::CUDNN_BATCHNORM_PER_ACTIVATION => {
+                miopenBatchNormMode_t::miopenBNPerActivation
+            }
+            // The persistent mode is an optimization of the spatial mode
+            cudnn9::cudnnBatchNormMode_t::CUDNN_BATCHNORM_SPATIAL
+            | cudnn9::cudnnBatchNormMode_t::CUDNN_BATCHNORM_SPATIAL_PERSISTENT => {
+                miopenBatchNormMode_t::miopenBNSpatial
+            }
+            _ => return Err(E::NOT_SUPPORTED),
+        })
+    }
+}
+
+impl<'a, E: CudaErrorType> FromCuda<'a, cudnn9::cudnnSoftmaxAlgorithm_t, E>
+    for miopenSoftmaxAlgorithm_t
+{
+    fn from_cuda(algo: &'a cudnn9::cudnnSoftmaxAlgorithm_t) -> Result<Self, E> {
+        Ok(match *algo {
+            cudnn9::cudnnSoftmaxAlgorithm_t::CUDNN_SOFTMAX_FAST => {
+                miopenSoftmaxAlgorithm_t::MIOPEN_SOFTMAX_FAST
+            }
+            cudnn9::cudnnSoftmaxAlgorithm_t::CUDNN_SOFTMAX_ACCURATE => {
+                miopenSoftmaxAlgorithm_t::MIOPEN_SOFTMAX_ACCURATE
+            }
+            cudnn9::cudnnSoftmaxAlgorithm_t::CUDNN_SOFTMAX_LOG => {
+                miopenSoftmaxAlgorithm_t::MIOPEN_SOFTMAX_LOG
+            }
+            _ => return Err(E::NOT_SUPPORTED),
+        })
+    }
+}
+
+impl<'a, E: CudaErrorType> FromCuda<'a, cudnn9::cudnnSoftmaxMode_t, E> for miopenSoftmaxMode_t {
+    fn from_cuda(mode: &'a cudnn9::cudnnSoftmaxMode_t) -> Result<Self, E> {
+        Ok(match *mode {
+            cudnn9::cudnnSoftmaxMode_t::CUDNN_SOFTMAX_MODE_INSTANCE => {
+                miopenSoftmaxMode_t::MIOPEN_SOFTMAX_MODE_INSTANCE
+            }
+            cudnn9::cudnnSoftmaxMode_t::CUDNN_SOFTMAX_MODE_CHANNEL => {
+                miopenSoftmaxMode_t::MIOPEN_SOFTMAX_MODE_CHANNEL
             }
             _ => return Err(E::NOT_SUPPORTED),
         })
