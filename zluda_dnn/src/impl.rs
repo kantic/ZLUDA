@@ -15,9 +15,28 @@ use std::{
 use zluda_common::{from_cuda_object, ZludaObject};
 
 mod backend;
+mod rnn;
 pub(crate) use backend::{
     backend_create_descriptor, backend_destroy_descriptor, backend_execute, backend_finalize,
     backend_get_attribute, backend_initialize, backend_set_attribute,
+};
+pub(crate) use rnn::{
+    create_rnn_data_descriptor as create_r_n_n_data_descriptor,
+    create_rnn_descriptor as create_r_n_n_descriptor,
+    destroy_rnn_data_descriptor as destroy_r_n_n_data_descriptor,
+    destroy_rnn_descriptor as destroy_r_n_n_descriptor,
+    get_rnn_params_size as get_r_n_n_params_size,
+    get_rnn_training_reserve_size as get_r_n_n_training_reserve_size,
+    get_rnn_workspace_size as get_r_n_n_workspace_size,
+    rnn_backward_data_ex as r_n_n_backward_data_ex,
+    rnn_backward_weights_ex as r_n_n_backward_weights_ex,
+    rnn_forward_inference_ex as r_n_n_forward_inference_ex,
+    rnn_forward_training_ex as r_n_n_forward_training_ex, rnn_set_clip as r_n_n_set_clip,
+    set_rnn_data_descriptor as set_r_n_n_data_descriptor,
+    set_rnn_descriptor_v6 as set_r_n_n_descriptor_v6,
+    set_rnn_matrix_math_type as set_r_n_n_matrix_math_type,
+    set_rnn_padding_mode as set_r_n_n_padding_mode,
+    set_rnn_projection_layers as set_r_n_n_projection_layers,
 };
 
 fn miopen() -> Result<&'static super::MIOpenVtable, miopenError_t> {
@@ -508,6 +527,25 @@ pub(crate) unsafe fn set_filter_nd_descriptor(
 ) -> miopenStatus_t {
     if nb_dims > 5 {
         return miopenStatus_t::ErrorNotImplemented;
+    }
+    // MIOpen supports layouts only for 4D and 5D tensors. A NCHW filter is a packed row-major
+    // tensor (e.g. the 3D weight filter of cuDNN RNNs)
+    if format == miopenTensorLayout_t::miopenTensorNCHW && !matches!(nb_dims, 4 | 5) {
+        if nb_dims < 1 || filter_dim_a.is_null() {
+            return miopenStatus_t::ErrorBadParm;
+        }
+        let dims = std::slice::from_raw_parts(filter_dim_a, nb_dims as usize);
+        let mut strides = vec![1i32; dims.len()];
+        for i in (0..dims.len() - 1).rev() {
+            strides[i] = strides[i + 1] * dims[i + 1];
+        }
+        return miopen()?.miopenSetTensorDescriptor(
+            filter_desc,
+            data_type,
+            nb_dims,
+            filter_dim_a,
+            strides.as_ptr(),
+        );
     }
     miopen()?.miopenSetNdTensorDescriptorWithLayout(
         filter_desc,
@@ -1356,6 +1394,21 @@ pub(crate) unsafe fn set_dropout_descriptor(
     state_size_in_bytes: usize,
     seed: ::core::ffi::c_ulonglong,
 ) -> miopenStatus_t {
+    // cuDNN allows a descriptor without random number generator states (e.g. for a dropout of 0),
+    // MIOpen would try to initialize them. Restoring sets the descriptor without initialization
+    if states.is_null() || state_size_in_bytes == 0 {
+        if dropout != 0.0 {
+            return Err(miopenError_t::BadParm);
+        }
+        return restore_dropout_descriptor(
+            dropout_desc,
+            handle,
+            dropout,
+            states,
+            state_size_in_bytes,
+            seed,
+        );
+    }
     miopen()?.miopenSetDropoutDescriptor(
         dropout_desc,
         handle.base,
