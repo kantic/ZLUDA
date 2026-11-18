@@ -14,7 +14,7 @@
    changed in the Wolfram installation.
 
    Requirements: the WolframGPUSDK paclet (nvcc), a C compiler, and the environment of a normal
-   ZLUDA run (ZLUDA and ROCm libraries on LD_LIBRARY_PATH, see AGENTS.md), because the original
+   ZLUDA run (ZLUDA and ROCm libraries on LD_LIBRARY_PATH, see README.md), because the original
    libraries have to be loaded to read their sources:
 
        LD_LIBRARY_PATH=<ZLUDA>/target/release:/opt/rocm/core-10.1/lib \

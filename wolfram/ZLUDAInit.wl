@@ -11,7 +11,7 @@
    Usage: load this file before using any GPU functionality, e.g. by adding
        Get["/path/to/ZLUDA/wolfram/ZLUDAInit.wl"]
    to ~/.Wolfram/Kernel/init.m, and start the kernel with the ZLUDA libraries on
-   LD_LIBRARY_PATH (see AGENTS.md).
+   LD_LIBRARY_PATH (see README.md in this directory).
 
    The ZLUDA library directory defaults to ../target/release relative to this file and can
    be overridden with the environment variable ZLUDA_LIB_DIR.
