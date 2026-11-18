@@ -77,6 +77,8 @@ cuda_macros::cublas_function_declarations!(
             cublasCsscal_v2_64,
             cublasCswap_v2,
             cublasCswap_v2_64,
+            cublasCtrmm_v2,
+            cublasCtrmm_v2_64,
             cublasCtrsm_v2_64,
             cublasDasum_v2,
             cublasDasum_v2_64,
@@ -219,6 +221,8 @@ cuda_macros::cublas_function_declarations!(
             cublasZscal_v2_64,
             cublasZswap_v2,
             cublasZswap_v2_64,
+            cublasZtrmm_v2,
+            cublasZtrmm_v2_64,
             cublasZtrsm_v2_64,
         ],
     implemented_and_always_succeeds
@@ -328,6 +332,8 @@ cuda_macros::rocblas_function_declarations!(
             rocblas_csscal_64,
             rocblas_cswap,
             rocblas_cswap_64,
+            rocblas_ctrmm,
+            rocblas_ctrmm_64,
             rocblas_ctrsm_64,
             rocblas_dasum,
             rocblas_dasum_64,
@@ -467,6 +473,8 @@ cuda_macros::rocblas_function_declarations!(
             rocblas_zscal_64,
             rocblas_zswap,
             rocblas_zswap_64,
+            rocblas_ztrmm,
+            rocblas_ztrmm_64,
             rocblas_ztrsm_64,
         ]
 );

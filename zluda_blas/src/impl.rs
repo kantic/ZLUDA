@@ -824,7 +824,7 @@ macro_rules! syrk {
 syrk!(ssyrk_v2 => rocblas_ssyrk: f32, dsyrk_v2 => rocblas_dsyrk: f64);
 
 macro_rules! trmm {
-    ($($name:ident => $roc:ident: $t:ty),*) => {
+    ($($name:ident => $roc:ident: $int:ty, $t:ty as $rt:ty),*) => {
         $(
             pub(crate) unsafe fn $name(
                 handle: &Handle,
@@ -832,55 +832,48 @@ macro_rules! trmm {
                 uplo: rocblas_fill,
                 trans: rocblas_operation,
                 diag: rocblas_diagonal,
-                m: ::core::ffi::c_int,
-                n: ::core::ffi::c_int,
+                m: $int,
+                n: $int,
                 alpha: *const $t,
                 a: *const $t,
-                lda: ::core::ffi::c_int,
+                lda: $int,
                 b: *const $t,
-                ldb: ::core::ffi::c_int,
+                ldb: $int,
                 c: *mut $t,
-                ldc: ::core::ffi::c_int,
+                ldc: $int,
             ) -> rocblas_status {
                 rocblas()?.$roc(
-                    handle.rocm_handle, side, uplo, trans, diag, m, n, alpha, a, lda, b, ldb, c, ldc,
+                    handle.rocm_handle,
+                    side,
+                    uplo,
+                    trans,
+                    diag,
+                    m,
+                    n,
+                    alpha.cast::<$rt>(),
+                    a.cast::<$rt>(),
+                    lda,
+                    b.cast::<$rt>(),
+                    ldb,
+                    c.cast::<$rt>(),
+                    ldc,
                 )
             }
         )*
     };
 }
 
-trmm!(strmm_v2 => rocblas_strmm: f32, dtrmm_v2 => rocblas_dtrmm: f64);
-
-macro_rules! trmm_64 {
-    ($($name:ident => $roc:ident: $t:ty),*) => {
-        $(
-            pub(crate) unsafe fn $name(
-                handle: &Handle,
-                side: rocblas_side,
-                uplo: rocblas_fill,
-                trans: rocblas_operation,
-                diag: rocblas_diagonal,
-                m: i64,
-                n: i64,
-                alpha: *const $t,
-                a: *const $t,
-                lda: i64,
-                b: *const $t,
-                ldb: i64,
-                c: *mut $t,
-                ldc: i64,
-            ) -> rocblas_status {
-                rocblas()?.$roc(
-                    handle.rocm_handle, side, uplo, trans, diag, m, n, alpha, a, lda, b, ldb, c, ldc,
-                )
-            }
-        )*
-    };
-}
-
-// cuSOLVER's blocked SVD (gesvd for min(m, n) > ~130) uses cublasDtrmm_v2_64
-trmm_64!(strmm_v2_64 => rocblas_strmm_64: f32, dtrmm_v2_64 => rocblas_dtrmm_64: f64);
+// cuSOLVER's blocked SVD (gesvd for min(m, n) > ~130) uses cublas{D,Z}trmm_v2_64
+trmm!(
+    strmm_v2 => rocblas_strmm: ::core::ffi::c_int, f32 as f32,
+    dtrmm_v2 => rocblas_dtrmm: ::core::ffi::c_int, f64 as f64,
+    ctrmm_v2 => rocblas_ctrmm: ::core::ffi::c_int, cuComplex as rocblas_float_complex,
+    ztrmm_v2 => rocblas_ztrmm: ::core::ffi::c_int, cuDoubleComplex as rocblas_double_complex,
+    strmm_v2_64 => rocblas_strmm_64: i64, f32 as f32,
+    dtrmm_v2_64 => rocblas_dtrmm_64: i64, f64 as f64,
+    ctrmm_v2_64 => rocblas_ctrmm_64: i64, cuComplex as rocblas_float_complex,
+    ztrmm_v2_64 => rocblas_ztrmm_64: i64, cuDoubleComplex as rocblas_double_complex
+);
 
 macro_rules! trsm {
     ($($name:ident => $roc:ident: $t:ty),*) => {
@@ -2990,6 +2983,75 @@ mod level12_tests {
         );
         let identity: Vec<f64> = two_i.iter().map(|x| x / 2.0).collect();
         assert_close(&f.download(db, n * n), &identity);
+    }
+
+    #[test]
+    fn ztrmm_64_conjugate_transpose() {
+        let f = Fixture::new();
+        let z = |x: f64, y: f64| cuDoubleComplex { x, y };
+        // C = A^H.B with A = [[1, i], [0, 2]] (upper: the stored 9 is ignored), B = [[1, 2], [i, 1]]
+        let a = [z(1.0, 0.0), z(9.0, 9.0), z(0.0, 1.0), z(2.0, 0.0)];
+        let b = [z(1.0, 0.0), z(0.0, 1.0), z(2.0, 0.0), z(1.0, 0.0)];
+        let (da, db, dc) = (f.upload(&a), f.upload(&b), f.upload(&[z(0.0, 0.0); 4]));
+        let one = z(1.0, 0.0);
+        assert_eq!(
+            unsafe {
+                crate::cublasZtrmm_v2_64(
+                    f.handle,
+                    cublasSideMode_t::CUBLAS_SIDE_LEFT,
+                    cublasFillMode_t::CUBLAS_FILL_MODE_UPPER,
+                    cublasOperation_t::CUBLAS_OP_C,
+                    cublasDiagType_t::CUBLAS_DIAG_NON_UNIT,
+                    2,
+                    2,
+                    &one,
+                    da,
+                    2,
+                    db,
+                    2,
+                    dc,
+                    2,
+                )
+            },
+            cublasStatus_t::SUCCESS
+        );
+        // A^H = [[1, 0], [-i, 2]]  =>  A^H.B = [[1, 2], [i, 2 - 2i]]
+        let c: Vec<_> = f.download(dc, 4).iter().map(|v| (v.x, v.y)).collect();
+        assert_eq!(c, [(1.0, 0.0), (0.0, 1.0), (2.0, 0.0), (2.0, -2.0)]);
+    }
+
+    #[test]
+    fn ctrmm() {
+        let f = Fixture::new();
+        let c = |x: f32, y: f32| cuComplex { x, y };
+        // C = i * B.L with B = [1, 1] (1x2), L = [[1, 0], [3 + i, 1]] (lower, unit diagonal)
+        let l = [c(9.0, 9.0), c(3.0, 1.0), c(9.0, 9.0), c(9.0, 9.0)];
+        let (dl, db, dc) = (f.upload(&l), f.upload(&[c(1.0, 0.0); 2]), f.upload(&[c(0.0, 0.0); 2]));
+        let alpha = c(0.0, 1.0);
+        assert_eq!(
+            unsafe {
+                crate::cublasCtrmm_v2(
+                    f.handle,
+                    cublasSideMode_t::CUBLAS_SIDE_RIGHT,
+                    cublasFillMode_t::CUBLAS_FILL_MODE_LOWER,
+                    cublasOperation_t::CUBLAS_OP_N,
+                    cublasDiagType_t::CUBLAS_DIAG_UNIT,
+                    1,
+                    2,
+                    &alpha,
+                    dl,
+                    2,
+                    db,
+                    1,
+                    dc,
+                    1,
+                )
+            },
+            cublasStatus_t::SUCCESS
+        );
+        // B.L = [4 + i, 1]  =>  i * B.L = [-1 + 4i, i]
+        let r: Vec<_> = f.download(dc, 2).iter().map(|v| (v.x, v.y)).collect();
+        assert_eq!(r, [(-1.0, 4.0), (0.0, 1.0)]);
     }
 
     #[test]
