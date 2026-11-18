@@ -224,12 +224,17 @@ pub(crate) unsafe fn set_stream_v2(handle: &Handle, stream: hipStream_t) -> rocb
     rocblas()?.rocblas_set_stream(handle.rocm_handle, stream)
 }
 
+// cuBLAS treats the user workspace as scratch space and still works when an operation needs
+// more. rocblas_set_workspace instead turns off rocBLAS-managed device memory, so every
+// operation that needs more than the workspace fails with rocblas_status_memory_error. E.g.
+// cuSOLVER sets a 4 MiB workspace and rocBLAS trsm copies the whole right-hand side into it,
+// so cusolverDnDgetrs failed for n > ~720. Keep rocBLAS managing its own memory instead.
 pub(crate) unsafe fn set_workspace_v2(
-    handle: &Handle,
-    workspace: *mut ::core::ffi::c_void,
-    size: usize,
+    _handle: &Handle,
+    _workspace: *mut ::core::ffi::c_void,
+    _size: usize,
 ) -> rocblas_status {
-    rocblas()?.rocblas_set_workspace(handle.rocm_handle, workspace, size)
+    Ok(())
 }
 
 pub(crate) unsafe fn get_math_mode(handle: &Handle, mode: &mut cublasMath_t) -> rocblas_status {
@@ -846,6 +851,36 @@ macro_rules! trmm {
 }
 
 trmm!(strmm_v2 => rocblas_strmm: f32, dtrmm_v2 => rocblas_dtrmm: f64);
+
+macro_rules! trmm_64 {
+    ($($name:ident => $roc:ident: $t:ty),*) => {
+        $(
+            pub(crate) unsafe fn $name(
+                handle: &Handle,
+                side: rocblas_side,
+                uplo: rocblas_fill,
+                trans: rocblas_operation,
+                diag: rocblas_diagonal,
+                m: i64,
+                n: i64,
+                alpha: *const $t,
+                a: *const $t,
+                lda: i64,
+                b: *const $t,
+                ldb: i64,
+                c: *mut $t,
+                ldc: i64,
+            ) -> rocblas_status {
+                rocblas()?.$roc(
+                    handle.rocm_handle, side, uplo, trans, diag, m, n, alpha, a, lda, b, ldb, c, ldc,
+                )
+            }
+        )*
+    };
+}
+
+// cuSOLVER's blocked SVD (gesvd for min(m, n) > ~130) uses cublasDtrmm_v2_64
+trmm_64!(strmm_v2_64 => rocblas_strmm_64: f32, dtrmm_v2_64 => rocblas_dtrmm_64: f64);
 
 macro_rules! trsm {
     ($($name:ident => $roc:ident: $t:ty),*) => {
@@ -2914,6 +2949,83 @@ mod level12_tests {
             cublasStatus_t::SUCCESS
         );
         assert_close(&f.download(db, 2), &[1.0, 2.0]);
+    }
+
+    #[test]
+    fn dtrsm_larger_than_workspace() {
+        let f = Fixture::new();
+        // cuSOLVER sets a small workspace and then calls trsm with a right-hand side that is
+        // larger than that workspace. cuBLAS handles this, so we must too.
+        let n = 256usize;
+        let workspace = f.upload(&[0u8; 4096]);
+        assert_eq!(
+            unsafe { crate::cublasSetWorkspace_v2(f.handle, workspace.cast(), 4096) },
+            cublasStatus_t::SUCCESS
+        );
+        // L = 2 I (lower), B = 2 I  =>  X = I
+        let mut two_i = vec![0.0f64; n * n];
+        for i in 0..n {
+            two_i[i * n + i] = 2.0;
+        }
+        let (dl, db) = (f.upload(&two_i), f.upload(&two_i));
+        let alpha = 1.0f64;
+        assert_eq!(
+            unsafe {
+                crate::cublasDtrsm_v2_64(
+                    f.handle,
+                    cublasSideMode_t::CUBLAS_SIDE_LEFT,
+                    cublasFillMode_t::CUBLAS_FILL_MODE_LOWER,
+                    cublasOperation_t::CUBLAS_OP_N,
+                    cublasDiagType_t::CUBLAS_DIAG_NON_UNIT,
+                    n as i64,
+                    n as i64,
+                    &alpha,
+                    dl,
+                    n as i64,
+                    db,
+                    n as i64,
+                )
+            },
+            cublasStatus_t::SUCCESS
+        );
+        let identity: Vec<f64> = two_i.iter().map(|x| x / 2.0).collect();
+        assert_close(&f.download(db, n * n), &identity);
+    }
+
+    #[test]
+    fn dtrmm_64() {
+        let f = Fixture::new();
+        // C = B.L with L = [[1, 0], [3, 1]] (lower, unit diagonal: the stored 5s are ignored),
+        // B = [[1, 2], [3, 4]], column-major, like cuSOLVER's gesvd call
+        let (dl, db, dc) = (
+            f.upload(&[5.0, 3.0, 7.0, 5.0f64]),
+            f.upload(&[1.0, 3.0, 2.0, 4.0f64]),
+            f.upload(&[0.0f64; 4]),
+        );
+        let alpha = 2.0f64;
+        assert_eq!(
+            unsafe {
+                crate::cublasDtrmm_v2_64(
+                    f.handle,
+                    cublasSideMode_t::CUBLAS_SIDE_RIGHT,
+                    cublasFillMode_t::CUBLAS_FILL_MODE_LOWER,
+                    cublasOperation_t::CUBLAS_OP_N,
+                    cublasDiagType_t::CUBLAS_DIAG_UNIT,
+                    2,
+                    2,
+                    &alpha,
+                    dl,
+                    2,
+                    db,
+                    2,
+                    dc,
+                    2,
+                )
+            },
+            cublasStatus_t::SUCCESS
+        );
+        // 2 * [[1 + 6, 2], [3 + 12, 4]]
+        assert_close(&f.download(dc, 4), &[14.0, 30.0, 4.0, 8.0]);
     }
 
     #[test]
